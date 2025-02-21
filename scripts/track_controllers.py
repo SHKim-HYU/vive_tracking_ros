@@ -1,4 +1,4 @@
-#!/bin/env python
+#!/bin/env python3
 import openvr
 from math import tau
 import numpy as np
@@ -27,7 +27,7 @@ class ViveTrackingROS():
         rospy.init_node("vive_tracking_ros")
 
         config_file = rospy.get_param("~config_file", None)
-
+        
         self.vr = triad_openvr(configfile_path=config_file)
 
         self.topic_map = {}
