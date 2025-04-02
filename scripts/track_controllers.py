@@ -13,6 +13,7 @@ import vive_tracking_ros.msg
 from vive_tracking_ros import math_utils, conversions
 
 from tf import transformations as tr
+import modern_robotics as mr
 
 from vive_tracking_ros.triad_openvr import triad_openvr
 
@@ -22,7 +23,7 @@ class ViveTrackingROS():
         Use this node to publish the pose and twist tracked from VR controllers using openVR.
         The controller inputs are also published as sensor_msgs.msg.Joy messages
     """
-
+    
     def __init__(self) -> None:
         rospy.init_node("vive_tracking_ros")
 
@@ -45,6 +46,8 @@ class ViveTrackingROS():
         self.vr.print_discovered_objects()
 
         self.is_quat_flipped = {}
+
+        self.T_pose = tr.euler_matrix(0,0,0)
 
         # keep previous orientation to check quaternion sign
         publishing_rate = rospy.get_param("~filter_pose", True)
@@ -162,12 +165,18 @@ class ViveTrackingROS():
             return
 
         # Rotate twist to align with ROS world (x forward/backward, y right/left, z up/down)
-        rotation = tr.quaternion_from_euler(0.0, tau/8, 0.0)
-        rotation = math_utils.rotate_quaternion_by_rpy(-tau/4, tau/2, 0.0, rotation)
+        # rotation = tr.quaternion_from_euler(0.0, tau/8, 0.0)
+        # rotation = math_utils.rotate_quaternion_by_rpy(-tau/4, tau/2, 0.0, rotation)
+        rotation = tr.quaternion_from_euler(0.0, -tau/2, 0.0)
+        rotation = math_utils.rotate_quaternion_by_rpy(tau/4, 0.0, 0, rotation)
+        rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/2, rotation)
+        rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/4, rotation)
 
         linear_velocity = math_utils.quaternion_rotate_vector(rotation, linear_velocity[:])
         angular_velocity = math_utils.quaternion_rotate_vector(rotation, angular_velocity[:])
-
+        V_s=np.append(linear_velocity,angular_velocity)
+        V_b=mr.Adjoint(mr.TransInv(self.T_pose))@V_s
+        linear_velocity = V_b[:3]; angular_velocity = V_b[3:]
         device_name_pub = device_name.replace('-', '_')
 
         twist_topic = self.topic_map.get(device_name, rospy.Publisher("/vive/" + device_name_pub + "/twist", geometry_msgs.msg.TwistStamped, queue_size=10))
@@ -198,31 +207,40 @@ class ViveTrackingROS():
 
         # rospy.loginfo_throttle(1, f"device {device_name} q:{np.round(pose[3:],4)}")
 
-        if self.is_quat_flipped.get(device_name, None) is None:
-            error_unflipped = np.linalg.norm(math_utils.orientation_error_as_rotation_vector(pose[3:], [0.125, 0.724, -0.0191, 0.6781]))
-            error_flipped = np.linalg.norm(math_utils.orientation_error_as_rotation_vector(pose[3:], [0.0101, -0.8328, 0.138, 0.5359]))
+        # if self.is_quat_flipped.get(device_name, None) is None:
+        #     error_unflipped = np.linalg.norm(math_utils.orientation_error_as_rotation_vector(pose[3:], [0.125, 0.724, -0.0191, 0.6781]))
+        #     error_flipped = np.linalg.norm(math_utils.orientation_error_as_rotation_vector(pose[3:], [0.0101, -0.8328, 0.138, 0.5359]))
 
-            self.is_quat_flipped[device_name] = error_unflipped > error_flipped
-            rospy.loginfo(f"Quat error unflipped: {error_unflipped}")
-            rospy.loginfo(f"Quat error flipped: {error_flipped}")
-            rospy.loginfo(f"Is quat flipped?: {self.is_quat_flipped}")
+        #     self.is_quat_flipped[device_name] = error_unflipped > error_flipped
+        #     rospy.loginfo(f"Quat error unflipped: {error_unflipped}")
+        #     rospy.loginfo(f"Quat error flipped: {error_flipped}")
+        #     rospy.loginfo(f"Is quat flipped?: {self.is_quat_flipped}")
 
         # Rotate twist to align with ROS world (x forward/backward, y right/left, z up/down)
         # TODO(cambel): how to have a unified orientation? maybe check basestation orientation?
-        if not self.is_quat_flipped.get(device_name):
-            # 1nd orientation
-            rotation = tr.quaternion_from_euler(0.0, -tau/2, 0.0)
-            rotation = math_utils.rotate_quaternion_by_rpy(tau/4, 0.0, 0, rotation)
-            rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/2, rotation)
-        else:
-            # 2nd orientation
-            rotation = tr.quaternion_from_euler(0.0, 0.0, tau/2)
-            rotation = math_utils.rotate_quaternion_by_rpy(-tau/4, 0.0, 0, rotation)
-            rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/16, rotation)
-
+        # if not self.is_quat_flipped.get(device_name):
+        # 1nd orientation   Base Station Pose Modification
+        rotation = tr.quaternion_from_euler(0.0, -tau/2, 0.0)
+        rotation = math_utils.rotate_quaternion_by_rpy(tau/4, 0.0, 0, rotation)
+        rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/2, rotation)
+        rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/4, rotation)
+        # else:
+        #     # 2nd orientation
+        #     rotation = tr.quaternion_from_euler(0.0, 0.0, tau/2)
+        #     rotation = math_utils.rotate_quaternion_by_rpy(-tau/4, 0.0, 0, rotation)
+        #     rotation = math_utils.rotate_quaternion_by_rpy(0.0, 0.0, tau/16, rotation)
+        
         pose[:3] = math_utils.quaternion_rotate_vector(rotation, pose[:3])
         pose[3:] = math_utils.normalize_quaternion(math_utils.quaternion_multiply(rotation, pose[3:]))
 
+        # Controller Pose Modification
+        T_init = tr.quaternion_matrix(pose[3:]); T_init[0:3,3]=[pose[0],pose[1],pose[2]]
+        T = T_init@tr.quaternion_matrix([0,1,0,0])
+        T = T@tr.quaternion_matrix([0,0,-0.70710454,  0.70710902])
+        self.T_pose = T@tr.quaternion_matrix([ 0.        , -0.34623254,  0.        ,  0.93814872])
+        
+        pose[:3] = [self.T_pose[0,3],self.T_pose[1,3],self.T_pose[2,3]]
+        pose[3:] = tr.quaternion_from_matrix(self.T_pose)
         return pose
 
     def publish_controller_pose(self, device_name, pose):  # relative to the base stations
